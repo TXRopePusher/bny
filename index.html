@@ -275,7 +275,7 @@ var City = (function () {
   var cam = { e: 200, n: -2400, dist: 9000, yaw: 0, pitch: 0.9, fov: 34 * Math.PI / 180, oy: 0 };
   var LIM = { dmin: 320, dmax: 19000, pmax: 1.36 };
   var VP = new Float32Array(16), eye = [0, 0, 0], dir = [0, 0, -1], rgt = [1, 0, 0], upv = [0, 1, 0], horizon = 0;
-  var pins = [], route = null, routeLen = 0, routeT = 0, routeStart = 0, me = null, sparks = [];
+  var pins = [], route = null, routeFocus = -1, routeLen = 0, routeT = 0, routeStart = 0, me = null, sparks = [];
   var cb = { tap: null, frame: null, move: null };
   var anim = null, lastTouch = -1e9, lastDraw = 0, paused = false, t0 = performance.now();
   var vel = { e: 0, n: 0 }, coasting = false, lod = false, quality = 0, slow = 0, dprCap = 2, adapt = !/hq/.test(location.hash);
@@ -342,7 +342,8 @@ var City = (function () {
       "else if(vT<1.5){float r=length(vUV);sol=smoothstep(0.50,0.40,r);add=exp(-r*r*3.2)*0.75;c=mix(c,vec3(1.0),sol*smoothstep(0.30,0.0,r)*0.55);}" + // head
       "else if(vT<2.5){float r=length(vUV);float w=fract(uTime*0.55);add=smoothstep(0.10,0.0,abs(r-w))*(1.0-w)*0.9;}" + // pulse ring
       "else if(vT<3.5){float x=1.0-abs(vUV.x);float dash=0.55+0.45*sin(vUV.y*0.045-uTime*3.2);sol=smoothstep(0.30,0.62,x)*0.92;add=x*x*0.55*dash;}" + // route
-      "else{float r=length(vUV);add=exp(-r*r*2.6)*0.9;}" +                                                // glow
+      "else if(vT<4.5){float r=length(vUV);add=exp(-r*r*2.6)*0.9;}" +                                   // glow
+      "else{float x=1.0-abs(vUV.x);float on=vT<5.5?1.0:step(fract(vUV.y),0.55);sol=smoothstep(0.30,0.62,x)*0.92*on;add=x*x*0.55*on;}" + // route leg: 5 solid, 6 dashed                                                // glow
       "float a=vCol.a;gl_FragColor=vec4(c*(add+sol)*a,sol*a);}"
     ]
   };
@@ -451,14 +452,22 @@ var City = (function () {
     qn = 0;
     var i, p, k;
     if (route && route.length > 1) {
-      var shown = routeLen * Math.min(1, (now - routeStart) / 1400), acc = 0;
-      for (i = 0; i < route.length - 1 && acc < shown; i++) {
-        var A = route[i], Bp = route[i + 1], seg = Math.hypot(Bp.e - A.e, Bp.n - A.n), steps = Math.max(1, Math.ceil(seg / 120));
-        for (k = 0; k < steps && acc < shown; k++) {
-          var f0 = k / steps, f1 = Math.min((k + 1) / steps, f0 + (shown - acc) / seg);
-          project(A.e + (Bp.e - A.e) * f0, 4, A.n + (Bp.n - A.n) * f0, pa); project(A.e + (Bp.e - A.e) * f1, 4, A.n + (Bp.n - A.n) * f1, pb);
-          if (pa.ok && pb.ok) line(pa.nx, pa.ny, pb.nx, pb.ny, 5.5, acc, acc + seg * (f1 - f0), [1.0, 0.86, 0.62], 1, 3);
-          acc += seg / steps;
+      // With a stop selected (routeFocus), the leg into it is solid, the leg out of it is dashed, and every other leg is faint.
+      // Faint legs draw first so the two bright ones sit on top where routes cross.
+      var shown = routeLen * Math.min(1, (now - routeStart) / 1400), dashU = 1 / (cam.dist * 0.02), acc;
+      for (var pass = 0; pass < 2; pass++) {
+        acc = 0;
+        for (i = 0; i < route.length - 1 && acc < shown; i++) {
+          var A = route[i], Bp = route[i + 1], seg = Math.hypot(Bp.e - A.e, Bp.n - A.n), steps = Math.max(1, Math.ceil(seg / 120));
+          var hot = routeFocus >= 0 && (i === routeFocus - 1 || i === routeFocus);
+          if ((pass === 1) !== hot) { acc += seg; continue; }
+          var t = routeFocus < 0 ? 3 : (i === routeFocus ? 6 : 5), w = routeFocus < 0 || hot ? 5.5 : 2.6, al = routeFocus < 0 || hot ? 1 : 0.13, sc = t === 6 ? dashU : 1;
+          for (k = 0; k < steps && acc < shown; k++) {
+            var f0 = k / steps, f1 = Math.min((k + 1) / steps, f0 + (shown - acc) / seg);
+            project(A.e + (Bp.e - A.e) * f0, 4, A.n + (Bp.n - A.n) * f0, pa); project(A.e + (Bp.e - A.e) * f1, 4, A.n + (Bp.n - A.n) * f1, pb);
+            if (pa.ok && pb.ok) line(pa.nx, pa.ny, pb.nx, pb.ny, w, acc * sc, (acc + seg * (f1 - f0)) * sc, [1.0, 0.86, 0.62], al, t);
+            acc += seg / steps;
+          }
         }
       }
     }
@@ -732,7 +741,8 @@ var City = (function () {
     setPins: function (a) { pins = a; },
     pins: function () { return pins; },
     setSparks: function (a) { sparks = a; },
-    setRoute: function (r) { route = r; routeLen = 0; routeStart = performance.now(); if (r) for (var i = 0; i < r.length - 1; i++) routeLen += Math.hypot(r[i + 1].e - r[i].e, r[i + 1].n - r[i].n); },
+    setRouteFocus: function (i) { routeFocus = i == null ? -1 : i; },
+    setRoute: function (r) { route = r; routeFocus = -1; routeLen = 0; routeStart = performance.now(); if (r) for (var i = 0; i < r.length - 1; i++) routeLen += Math.hypot(r[i + 1].e - r[i].e, r[i + 1].n - r[i].n); },
     setMe: function (p) { me = p; },
     flyTo: flyTo, fit: fit,
     setOffset: function (oy, now) { cam.oyTarget = oy; if (now) { cam.oy = oy; oyAnim = null; } else oyAnim = { a: cam.oy, b: oy, t0: performance.now() }; },
@@ -779,7 +789,7 @@ var City = (function () {
   const has3d = City.init($("#city"), CITY);
   if (!has3d) document.body.classList.add("no3d");
   const noop = () => { };
-  const M = has3d ? City : { setPins: noop, setRoute: noop, setMe: noop, flyTo: noop, fit: noop, setOffset: noop, pause: noop, poke: noop, on: noop, setSparks: noop, toEN: City.toEN, cam: { dist: 9000 }, project: () => ({ ok: false }) };
+  const M = has3d ? City : { setPins: noop, setRoute: noop, setRouteFocus: noop, setMe: noop, flyTo: noop, fit: noop, setOffset: noop, pause: noop, poke: noop, on: noop, setSparks: noop, toEN: City.toEN, cam: { dist: 9000 }, project: () => ({ ok: false }) };
   const pins = P.map(p => ({ id: p.id, e: p.e, n: p.n, c: p.mine ? GOLD : ROSE, s: 0.4, a: 1, sel: false, sx: -999, sy: 0 }));
   const pinOf = {};
   pins.forEach(p => { pinOf[p.id] = p; });
@@ -888,6 +898,12 @@ var City = (function () {
         Object.keys(num).forEach(id => { const el = document.createElement("div"); el.className = "stopm"; el.textContent = num[id]; labels.insertBefore(el, pinLabel); markers.push({ el, pin: pinOf[id] }); });
       } else M.setRoute(null);
     }
+    let focus = -1;
+    if (inDays && S.place) {
+      const ids = day.stops.filter(s => s.pid && !s.soft).map(s => s.pid);
+      focus = S.ri != null && ids[S.ri] === S.place ? S.ri : ids.indexOf(S.place);
+    }
+    M.setRouteFocus(focus);
     const sp = S.place ? byId[S.place] : null;
     pinLabel.firstChild.textContent = sp ? sp.name : "";
     M.poke();
@@ -947,24 +963,24 @@ var City = (function () {
     setTab(b.dataset.tab);
   });
 
-  function stopHTML(s, n) {
+  function stopHTML(s, n, ri) {
     const p = s.pid ? byId[s.pid] : null;
     const tags = [];
     if (p) tags.push(p.mine ? '<span class="chip">Your pin</span>' : '<span class="chip new">New for you</span>');
     (s.tags || []).forEach(t => tags.push(`<span class="chip plain">${esc(t)}</span>`));
     if (p && p.tt) tags.push(`<a class="chip tt" data-tt href="${esc(p.tt[0].u)}" target="_blank" rel="noopener">${I.play}TikTok</a>`);
-    return `<li class="stop${s.soft || !p ? " soft" : ""}"${p ? ` data-pid="${p.id}"` : ""}>
+    return `<li class="stop${s.soft || !p ? " soft" : ""}"${p ? ` data-pid="${p.id}"` : ""}${ri != null ? ` data-ri="${ri}"` : ""}>
       <div class="t">${esc(s.t || "")}</div><div class="rail"><i>${p && !s.soft ? n : ""}</i></div>
       <div class="c"><h3>${esc(s.title || (p && p.name))}</h3><p>${s.note || ""}</p>${tags.length ? `<div class="tags">${tags.join("")}</div>` : ""}</div>
       ${p ? thumb(p) : "<span></span>"}</li>`;
   }
   function renderDays() {
-    const d = DATA.days[S.day]; let n = 0; const seen = {};
+    const d = DATA.days[S.day]; let n = 0, ri = 0; const seen = {};
     $("#v-days").innerHTML = `
       <div class="dayswitch">${DATA.days.map((x, i) => `<button data-day="${i}" class="${i === S.day ? "on" : ""}"><b>${x.short}</b><span>${x.num}</span></button>`).join("")}</div>
       <div><div class="kicker">${esc(d.dow)}, ${esc(d.date)}</div><h2>${esc(d.title)}</h2><p class="sub">${d.sub}</p>
         <div class="facts">${d.facts.map(f => `<span class="chip plain">${esc(f)}</span>`).join("")}</div></div>
-      <ol class="tl">${d.stops.map(s => { const numbered = s.pid && !s.soft && !seen[s.pid]; if (numbered) { seen[s.pid] = 1; n++; } return stopHTML(s, n); }).join("")}</ol>
+      <ol class="tl">${d.stops.map(s => { const numbered = s.pid && !s.soft && !seen[s.pid]; if (numbered) { seen[s.pid] = 1; n++; } return stopHTML(s, n, s.pid && !s.soft ? ri++ : null); }).join("")}</ol>
       ${d.more.length ? `<div class="block"><h4>More of your pins near today's route</h4><div class="mini">${d.more.map(id => `<button data-pid="${id}">${esc(byId[id].name)}</button>`).join("")}</div></div>` : ""}
       ${d.foot ? `<p class="fine">${d.foot}</p>` : ""}`;
   }
@@ -972,7 +988,7 @@ var City = (function () {
     const b = e.target.closest("[data-day]");
     if (b) { S.day = +b.dataset.day; renderDays(); $("#v-days").scrollTop = 0; syncMap(); flyDay(); return; }
     if (e.target.closest("[data-tt]")) return;      // let the TikTok link open
-    const s = e.target.closest("[data-pid]"); if (s) openPlace(s.dataset.pid);
+    const s = e.target.closest("[data-pid]"); if (s) openPlace(s.dataset.pid, false, s.dataset.ri != null ? +s.dataset.ri : null);
   });
 
   function rowHTML(p, extra) {
@@ -1025,9 +1041,9 @@ var City = (function () {
     const r = e.target.closest("[data-pid]"); if (r) openPlace(r.dataset.pid);
   });
 
-  function openPlace(id, fromMap) {
+  function openPlace(id, fromMap, ri) {
     const p = byId[id]; if (!p) return;
-    const first = !S.place; S.place = id;
+    const first = !S.place; S.place = id; S.ri = ri == null ? null : ri;
     const days = dayOf(id), near = P.filter(x => x.id !== id).map(x => ({ x, d: Math.hypot(x.e - p.e, x.n - p.n) })).sort((a, b) => a.d - b.d).slice(0, 4);
     const hrs = p.hours ? DATA.days.map(d => p.hours[d.short] ? `<tr><td>${d.short} ${d.num}</td><td>${esc(p.hours[d.short].join(", "))}</td></tr>` : "").join("") : "";
     const meta = [esc(p.cat), esc(p.hood), p.rating ? `<b>${stars(p)}</b>${p.reviews ? " (" + p.reviews.toLocaleString("en-US") + ")" : ""}` : "", esc(p.price || "")].filter(Boolean).join(" &middot; ");
